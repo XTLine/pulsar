@@ -647,6 +647,8 @@ public class ScalableTopics extends AdminResource {
     @Operation(summary = "Delete a scalable topic and all its segments.")
     @ApiResponses(value = {
             @ApiResponse(responseCode = "204", description = "Scalable topic deleted successfully"),
+            @ApiResponse(responseCode = "307",
+                    description = "Current broker is not the controller leader for this topic"),
             @ApiResponse(responseCode = "401",
                     description = "Don't have permission to administrate resources on this tenant"),
             @ApiResponse(responseCode = "403", description = "Don't have admin permission on the namespace"),
@@ -672,8 +674,14 @@ public class ScalableTopics extends AdminResource {
                         throw new RestException(Response.Status.NOT_FOUND,
                                 "Scalable topic not found: " + tn);
                     }
-                    // Delete metadata first, then best-effort clean up segment topics
-                    return resources().deleteScalableTopicAsync(tn)
+                    // Stop the elected controller before removing its lock with the metadata subtree.
+                    return redirectToControllerLeaderIfNeeded(tn)
+                            .thenCompose(__ -> {
+                                ScalableTopicService service = pulsar().getBrokerService().getScalableTopicService();
+                                return service == null ? CompletableFuture.completedFuture(null)
+                                        : service.releaseController(tn);
+                            })
+                            .thenCompose(__ -> resources().deleteScalableTopicAsync(tn))
                             .thenCompose(__ -> deleteSegmentTopics(tn, optMd.get(), force));
                 })
                 .thenAccept(__ -> {
@@ -682,8 +690,10 @@ public class ScalableTopics extends AdminResource {
                     asyncResponse.resume(Response.noContent().build());
                 })
                 .exceptionally(ex -> {
-                    log.error().attr("clientAppId", clientAppId()).attr("topic", tn)
-                            .exception(ex).log("Failed to delete scalable topic");
+                    if (!isRedirectException(ex)) {
+                        log.error().attr("clientAppId", clientAppId()).attr("topic", tn)
+                                .exception(ex).log("Failed to delete scalable topic");
+                    }
                     resumeAsyncResponseExceptionally(asyncResponse, ex);
                     return null;
                 });
@@ -719,7 +729,14 @@ public class ScalableTopics extends AdminResource {
         // Served by the controller leader: the STREAM consumer sessions (connected state,
         // segment assignment) only exist in the leader's memory.
         validateTopicOperationAsync(tn, TopicOperation.GET_STATS)
-                .thenCompose(__ -> onControllerLeader(tn, svc -> svc.getStats(tn)))
+                .thenCompose(__ -> resources().getScalableTopicMetadataAsync(tn, true))
+                .thenCompose(optMd -> {
+                    if (optMd.isEmpty()) {
+                        return FutureUtil.failedFuture(new RestException(Response.Status.NOT_FOUND,
+                                "Scalable topic not found: " + tn));
+                    }
+                    return onControllerLeader(tn, svc -> svc.getStats(tn));
+                })
                 .thenAccept(asyncResponse::resume)
                 .exceptionally(ex -> {
                     if (!isRedirectException(ex)) {

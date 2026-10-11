@@ -35,6 +35,7 @@ import org.apache.pulsar.common.policies.data.ScalableSubscriptionType;
 import org.apache.pulsar.common.policies.data.ScalableTopicStats;
 import org.apache.pulsar.common.policies.data.SegmentTopicStats;
 import org.awaitility.Awaitility;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 /**
@@ -44,6 +45,36 @@ import org.testng.annotations.Test;
  * ({@code admin.scalableTopics().getSegmentStats}).
  */
 public class V5ScalableTopicStatsTest extends V5ClientBaseTest {
+
+    @DataProvider
+    public Object[][] readStatsBeforeDelete() {
+        return new Object[][] {{false}, {true}};
+    }
+
+    @Test(dataProvider = "readStatsBeforeDelete")
+    public void testDeletingTopicDoesNotRetainStats(boolean readStats) throws Exception {
+        String topic = newScalableTopic(1);
+        if (readStats) {
+            assertEquals(admin.scalableTopics().getStats(topic).getLayout().getSegments().size(), 1);
+        }
+        admin.scalableTopics().deleteScalableTopic(topic, true);
+        assertThrows(PulsarAdminException.NotFoundException.class,
+                () -> admin.scalableTopics().getMetadata(topic));
+        assertTrue(!admin.scalableTopics().listScalableTopics(getNamespace()).contains(topic),
+                "deleted topics must disappear from the namespace listing");
+        // A new topic with the same name must not inherit the deleted controller's layout.
+        admin.scalableTopics().createScalableTopic(topic, 2);
+        assertEquals(admin.scalableTopics().getStats(topic).getLayout().getSegments().size(), 2);
+    }
+
+    @Test
+    public void testStatsOfDeletedTopicReturnNotFound() throws Exception {
+        String topic = newScalableTopic(1);
+        admin.scalableTopics().getStats(topic);
+        admin.scalableTopics().deleteScalableTopic(topic, true);
+        assertThrows(PulsarAdminException.NotFoundException.class,
+                () -> admin.scalableTopics().getStats(topic));
+    }
 
     @Test
     public void testTopicStatsAggregateAcrossSegments() throws Exception {
